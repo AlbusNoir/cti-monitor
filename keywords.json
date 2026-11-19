@@ -6,7 +6,8 @@
     "in the wild",
     "unauthenticated rce",
     "emergency patch",
-    "mass exploitation"
+    "mass exploitation",
+    "ransomware"
   ],
   "watch_vendors": [
     "fortinet",

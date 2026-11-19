@@ -1,21 +1,23 @@
 # CTI Monitor
 
-A lightweight, automated Cyber Threat Intelligence (CTI) collector and Discord push-notification ticker built with Python, `uv`, SQLite, and Apprise. It polls structured vulnerability feeds, ransomware leak trackers, vendor PSIRTs, threat research blogs, government CERTs, and breaking security news, enriches headlines with CISA KEV and FIRST EPSS data, and routes alerts into dedicated Discord channels.
+A lightweight, automated Cyber Threat Intelligence (CTI) collector and Discord push-notification ticker built with Python, `uv`, SQLite, and Apprise. It polls ~60 structured vulnerability feeds, ransomware leak trackers, vendor PSIRTs, threat research blogs, government CERTs, and breaking security news, enriches headlines with CISA KEV and FIRST EPSS data, deduplicates overlapping coverage, and routes alerts into dedicated Discord channels.
 
 ## How It Works
 
-1. **Source Ingestion (`feeds.json`):** Polls ~60 curated RSS, Atom, and JSON endpoints using `curl_cffi` (Chrome TLS impersonation) and `feedparser` with per-source timeouts and category routing.
-2. **State & Deduplication (`cti_monitor.db`):** Stores seen item IDs in a local SQLite database so repeated cron runs never post duplicate alerts.
+1. **Source Ingestion (`feeds.json`):** Polls curated RSS, Atom, and JSON endpoints using `curl_cffi` (Chrome TLS impersonation) and `feedparser` with per-source timeouts and category routing.
+2. **Two-Tier Deduplication (`cti_monitor.db`):**
+   * **Exact Item Deduplication (`seen_items`):** Stores every seen item ID in SQLite so repeated cron runs never re-process old entries.
+   * **Channel-Scoped Headline Deduplication (`posted_headlines`):** Normalizes titles and extracts CVEs/tokens over a rolling 36-hour window per channel. If multiple news outlets report the exact same story in `#firehose`, only the first headline posts while primary-source advisories in `#vendor-psirts-vulns` or `#active-exploitation` still post normally.
 3. **CVE Enrichment (`kev_cache.json` + FIRST EPSS):** Automatically extracts `CVE-YYYY-NNNN` identifiers from incoming headlines, cross-references them against a locally cached copy of the CISA Known Exploited Vulnerabilities (KEV) catalog, and queries the FIRST EPSS API for exploitation probability scores.
-4. **Dynamic Keyword & Escalation Routing (`keywords.json`):** Evaluates headlines against user-defined keywords, vendor watchlists, KEV matches, and EPSS thresholds. High-priority matches are cross-posted to `#active-exploitation`.
-5. **Notification Delivery (`webhooks.json` + Apprise):** Formats clean, embed-suppressed Markdown links and delivers them to Discord (or any Apprise-supported service).
+4. **Dynamic Keyword & Escalation Routing (`keywords.json`):** Evaluates headlines against active-exploitation keywords, retrospective exclusion rules (`ignore_escalation_keywords`), vendor watchlists, KEV matches, and EPSS thresholds. High-priority matches are cross-posted to `#active-exploitation`.
+5. **Notification Delivery (`webhooks.json` + Apprise):** Formats clean, embed-suppressed Markdown links (`<URL>`) and delivers them to Discord (or any Apprise-supported provider).
 6. **Health Monitoring (`#bot-status`):** Tracks per-feed HTTP status, consecutive failures, and recovery events in SQLite, alerting after 3 consecutive failures and generating a daily health digest.
 
 ## Repository Structure
 
-* `cti_monitor.py` — Main collector, enrichment engine, and health reporter.
+* `cti_monitor.py` — Main collector, enrichment engine, deduplicator, and health reporter.
 * `feeds.json` — Master registry of intelligence sources, categories, and target channels.
-* `keywords.json` — Dynamic keyword escalation rules, vendor watchlists, and EPSS thresholds.
+* `keywords.json` — Dynamic keyword escalation rules, ignore filters, vendor watchlists, and EPSS thresholds.
 * `webhooks.example.json` — Template for configuring Apprise notification URLs.
 * `webhooks.json` — Live Apprise notification URLs *(ignored by Git)*.
 * `cti_monitor.db` — Local SQLite deduplication and feed health database *(ignored by Git)*.
@@ -61,25 +63,38 @@ Verify your `uv` binary path (`which uv`), then add two entries via `crontab -e`
 0 13 * * * /home/ubuntu/.local/bin/uv run --project /home/ubuntu/cti-monitor /home/ubuntu/cti-monitor/cti_monitor.py --health-report >> /home/ubuntu/cti-monitor/cron.log 2>&1
 ```
 
-## Day-to-Day Management
+## Managing Feeds & Keywords
 
-* **Add or Edit Keywords / Vendors:** Edit `keywords.json` directly. Changes take effect automatically on the next 10-minute run without restarting anything.
-* **Add, Disable, or Re-Route Feeds:** Edit `feeds.json`. Set `"enabled": false` to mute a noisy or broken source without deleting its entry.
-* **Check Feed Health Manually:**
-  ```bash
-  uv run cti_monitor.py --health-report
-  ```
-* **Inspect Local SQLite Health Table:**
+### Adding or Tuning Feeds (`feeds.json`)
+Each object in `feeds.json` follows this schema:
+```json
+{
+  "name": "Example Security Blog",
+  "url": "https://example.com",
+  "type": "rss",
+  "category": "vendor-research",
+  "channel": "threat-research",
+  "enabled": true
+}
+```
+* **`type`:** Use `"rss"` for standard RSS/Atom feeds or `"cisa_kev"` for the official CISA KEV JSON endpoint.
+* **`channel`:** Must match a key defined in `webhooks.json` (`active-exploitation`, `vendor-psirts-vulns`, `threat-research`, `gov-cert-advisories`, or `firehose`).
+* **Muting Noisy Feeds:** Set `"enabled": false` to stop polling a source without removing it from the registry.
+
+### Tuning Escalation Rules (`keywords.json`)
+`keywords.json` is reloaded dynamically on every run:
+* **`escalate_keywords`:** Case-insensitive phrases that cross-post matching headlines into `#active-exploitation`.
+* **`ignore_escalation_keywords`:** Prevents retrospective roundups (e.g., `"patch tuesday"`, `"roundup"`, `"webinar"`) from triggering escalation alerts.
+* **`watch_vendors` & `escalate_watch_vendors`:** Adds a vendor badge (`🏷️`) to matching posts; set `escalate_watch_vendors` to `true` during active vendor incidents to forward all mentions to `#active-exploitation`.
+* **`auto_escalate_kev_cves` & `epss_threshold_percent`:** Automatically badges and escalates headlines mentioning CVEs present in CISA KEV or exceeding your EPSS probability threshold.
+
+## Day-to-Day Operations & Troubleshooting
+
+* **Check Feed Health Manually:** `uv run cti_monitor.py --health-report`
+* **Inspect Failing Feeds in SQLite:**
   ```bash
   sqlite3 cti_monitor.db "SELECT source_name, consecutive_failures, last_status, last_error FROM feed_health WHERE consecutive_failures > 0;"
   ```
-* **View Execution Logs:**
-  ```bash
-  tail -n 50 ~/cti-monitor/cron.log
-  ```
-
-## Troubleshooting
-
-* **Discord Rate Limits:** The script includes a `1.5s` delay between webhook posts to stay safely beneath Discord's 30 requests/minute webhook limit.
-* **Cloudflare / WAF Blocks:** Requests use `curl_cffi` with Chrome TLS fingerprinting. If a publisher blocks datacenter IP ranges outright, disable the feed in `feeds.json` or route it via a Google News RSS query (`site:example.com`).
-* **Resetting History:** To wipe seen articles and re-seed from scratch, delete `cti_monitor.db` and re-run `uv run cti_monitor.py --init`.
+* **Inspect Suppressed Duplicates:** `grep "\[DEDUPED\]" ~/cti-monitor/cron.log | tail -n 20`
+* **Cloudflare / WAF Blocks:** Requests use `curl_cffi` with Chrome TLS fingerprinting. If a site blocks datacenter IP ranges outright, disable it in `feeds.json` or route it via a Google News RSS query (`site:example.com`).
+* **Resetting History:** Delete `cti_monitor.db` and re-run `uv run cti_monitor.py --init`.

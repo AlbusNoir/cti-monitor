@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets & Credentials
+webhooks.json
+
+# Runtime State, Cache & Logs
+cti_monitor.db
+cti_monitor.db-journal
+kev_cache.json
+cron.log

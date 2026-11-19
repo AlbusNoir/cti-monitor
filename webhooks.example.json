@@ -1,0 +1,8 @@
+{
+  "active-exploitation": "discord://WEBHOOK_ID/WEBHOOK_TOKEN",
+  "vendor-psirts-vulns": "discord://WEBHOOK_ID/WEBHOOK_TOKEN",
+  "threat-research": "discord://WEBHOOK_ID/WEBHOOK_TOKEN",
+  "gov-cert-advisories": "discord://WEBHOOK_ID/WEBHOOK_TOKEN",
+  "firehose": "discord://WEBHOOK_ID/WEBHOOK_TOKEN",
+  "bot-status": "discord://WEBHOOK_ID/WEBHOOK_TOKEN"
+}

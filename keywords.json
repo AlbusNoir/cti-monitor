@@ -1,0 +1,26 @@
+{
+  "escalate_keywords": [
+    "zero-day",
+    "0-day",
+    "actively exploited",
+    "in the wild",
+    "unauthenticated rce",
+    "emergency patch",
+    "mass exploitation"
+  ],
+  "watch_vendors": [
+    "fortinet",
+    "palo alto",
+    "cisco",
+    "microsoft",
+    "ivanti",
+    "citrix",
+    "vmware",
+    "okta",
+    "sonicwall"
+  ],
+  "escalate_watch_vendors": false,
+  "auto_escalate_kev_cves": true,
+  "epss_threshold_percent": 50.0,
+  "ping_here_on_escalation": false
+}

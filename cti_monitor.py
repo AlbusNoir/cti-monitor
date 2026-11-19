@@ -23,6 +23,15 @@ KEV_CACHE_PATH = BASE_DIR / "kev_cache.json"
 REQUEST_TIMEOUT = 25
 FAILURE_ALERT_THRESHOLD = 3
 CVE_REGEX = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
+DEDUPE_WINDOW_HOURS = 36
+DEDUPE_SIMILARITY_THRESHOLD = 0.55
+STOP_WORDS = {
+    "the", "and", "for", "with", "from", "into", "over", "after", "under",
+    "new", "update", "updates", "report", "reports", "warns", "warning",
+    "flaw", "flaws", "vulnerability", "vulnerabilities", "bug", "bugs",
+    "hackers", "attackers", "threat", "security", "researchers", "users",
+    "patch", "patches", "critical", "high", "via", "now", "how", "why"
+}
 BT = chr(96)
 
 
@@ -54,6 +63,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             last_status TEXT,
             last_error TEXT,
             alerted_down INTEGER DEFAULT 0
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS posted_headlines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            tokens TEXT NOT NULL,
+            cves TEXT NOT NULL,
+            posted_at TEXT NOT NULL
         )
     ''')
     conn.commit()
@@ -101,6 +121,53 @@ def is_valid_http_url(url: str) -> bool:
         return parsed.scheme in ("http", "https") and bool(parsed.netloc)
     except Exception:
         return False
+
+
+def tokenize_headline(title: str) -> tuple:
+    cves = sorted(set(m.upper() for m in CVE_REGEX.findall(title)))
+    words = re.findall(r"[a-z0-9]{3,}", title.lower())
+    tokens = sorted(set(w for w in words if w not in STOP_WORDS and not w.startswith("cve")))
+    return tokens, cves
+
+
+def is_channel_duplicate(conn: sqlite3.Connection, channel: str, title: str) -> str | None:
+    tokens, cves = tokenize_headline(title)
+    if not tokens and not cves:
+        return None
+
+    rows = conn.execute(
+        """
+        SELECT source_name, title, tokens, cves FROM posted_headlines
+        WHERE channel = ? AND datetime(posted_at) >= datetime('now', ?)
+        """,
+        (channel, f"-{DEDUPE_WINDOW_HOURS} hours"),
+    ).fetchall()
+
+    token_set = set(tokens)
+    cve_set = set(cves)
+
+    for prev_source, prev_title, prev_tokens_json, prev_cves_json in rows:
+        prev_cves = set(json.loads(prev_cves_json))
+        if cve_set and prev_cves and (cve_set & prev_cves):
+            return f"{prev_source}: {prev_title[:80]}"
+
+        prev_tokens = set(json.loads(prev_tokens_json))
+        if len(token_set) >= 3 and len(prev_tokens) >= 3:
+            union = len(token_set | prev_tokens)
+            if union > 0:
+                jaccard = len(token_set & prev_tokens) / union
+                if jaccard >= DEDUPE_SIMILARITY_THRESHOLD:
+                    return f"{prev_source}: {prev_title[:80]}"
+    return None
+
+
+def record_posted_headline(conn: sqlite3.Connection, channel: str, source_name: str, title: str, now_iso: str) -> None:
+    tokens, cves = tokenize_headline(title)
+    conn.execute(
+        "INSERT INTO posted_headlines (channel, source_name, title, tokens, cves, posted_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (channel, source_name, title, json.dumps(tokens), json.dumps(cves), now_iso),
+    )
+    conn.commit()
 
 
 def build_notifiers(webhooks: dict) -> dict:
@@ -349,15 +416,23 @@ def run_poll(conn: sqlite3.Connection, feeds: list, notifiers: dict, init_mode: 
                 total_seeded += 1
 
                 if not init_mode:
+                    dup_match = is_channel_duplicate(conn, channel, clean_title)
+                    if dup_match:
+                        print(f"[DEDUPED] ({channel}) {name}: {clean_title} ~= {dup_match}")
+                        continue
+
                     badges, reasons = enrich_and_evaluate(clean_title, ftype, kev_set, kw_cfg)
                     base_msg = f"**[{name}]** [{clean_title}](<{item['link']}>){badges}"
                     send_discord(notifiers, channel, base_msg)
+                    record_posted_headline(conn, channel, name, clean_title, now)
 
                     if reasons and channel != "active-exploitation":
-                        ping = "@here " if kw_cfg.get("ping_here_on_escalation", False) else ""
-                        reason_tag = ", ".join(reasons)
-                        esc_msg = f"{ping}🔔 **[{reason_tag}]** **[{name}]** [{clean_title}](<{item['link']}>){badges}"
-                        send_discord(notifiers, "active-exploitation", esc_msg)
+                        if not is_channel_duplicate(conn, "active-exploitation", clean_title):
+                            ping = "@here " if kw_cfg.get("ping_here_on_escalation", False) else ""
+                            reason_tag = ", ".join(reasons)
+                            esc_msg = f"{ping}🔔 **[{reason_tag}]** **[{name}]** [{clean_title}](<{item['link']}>){badges}"
+                            send_discord(notifiers, "active-exploitation", esc_msg)
+                            record_posted_headline(conn, "active-exploitation", name, clean_title, now)
 
             update_health(conn, feed, True, "", found_new, notifiers, init_mode)
 

@@ -1,13 +1,21 @@
 {
   "escalate_keywords": [
-    "zero-day",
-    "0-day",
     "actively exploited",
+    "exploited in the wild",
     "in the wild",
     "unauthenticated rce",
     "emergency patch",
+    "out-of-band",
     "mass exploitation",
-    "ransomware"
+    "under active attack"
+  ],
+  "ignore_escalation_keywords": [
+    "patch tuesday",
+    "roundup",
+    "recap",
+    "digest",
+    "webinar",
+    "podcast"
   ],
   "watch_vendors": [
     "fortinet",

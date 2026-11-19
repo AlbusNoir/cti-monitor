@@ -231,10 +231,15 @@ def enrich_and_evaluate(title: str, source_type: str, kev_set: set, kw_cfg: dict
             if pct >= threshold and kw_cfg.get("auto_escalate_kev_cves", True):
                 reasons.append(f"High EPSS ({pct}%)")
 
-    for kw in kw_cfg.get("escalate_keywords", []):
-        if kw and kw.lower() in title_lower:
-            reasons.append(f"Keyword: {kw}")
-            break
+    ignored = any(
+        ig and ig.lower() in title_lower
+        for ig in kw_cfg.get("ignore_escalation_keywords", [])
+    )
+    if not ignored:
+        for kw in kw_cfg.get("escalate_keywords", []):
+            if kw and kw.lower() in title_lower:
+                reasons.append(f"Keyword: {kw}")
+                break
 
     matched_vendor = None
     for vendor in kw_cfg.get("watch_vendors", []):

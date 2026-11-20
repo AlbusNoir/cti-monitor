@@ -6,6 +6,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -76,6 +77,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             posted_at TEXT NOT NULL
         )
     ''')
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(seen_items)").fetchall()]
+    if "escalated" not in cols:
+        conn.execute("ALTER TABLE seen_items ADD COLUMN escalated INTEGER DEFAULT 0")
     conn.commit()
 
 
@@ -168,6 +172,20 @@ def record_posted_headline(conn: sqlite3.Connection, channel: str, source_name: 
         (channel, source_name, title, json.dumps(tokens), json.dumps(cves), now_iso),
     )
     conn.commit()
+
+
+def is_meaningful_update(old_title: str, new_title: str) -> bool:
+    if old_title == new_title:
+        return False
+    old_cves = set(m.upper() for m in CVE_REGEX.findall(old_title))
+    new_cves = set(m.upper() for m in CVE_REGEX.findall(new_title))
+    if new_cves - old_cves:
+        return True
+    norm_old = re.sub(r"[^a-z0-9\s]", "", old_title.lower()).strip()
+    norm_new = re.sub(r"[^a-z0-9\s]", "", new_title.lower()).strip()
+    if norm_old == norm_new:
+        return False
+    return SequenceMatcher(None, norm_old, norm_new).ratio() < 0.85
 
 
 def build_notifiers(webhooks: dict) -> dict:
@@ -405,39 +423,78 @@ def run_poll(conn: sqlite3.Connection, feeds: list, notifiers: dict, init_mode: 
 
             found_new = False
             for item in items:
-                exists = conn.execute(
-                    "SELECT 1 FROM seen_items WHERE item_id = ?", (item["id"],)
-                ).fetchone()
-                if exists:
-                    continue
-
                 clean_title = sanitize_title(item["title"])
-                conn.execute(
-                    "INSERT INTO seen_items (item_id, source_name, category, title, link, seen_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (item["id"], name, category, clean_title, item["link"], now),
-                )
-                conn.commit()
-                found_new = True
-                total_seeded += 1
+                row = conn.execute(
+                    "SELECT title, COALESCE(escalated, 0) FROM seen_items WHERE item_id = ?",
+                    (item["id"],),
+                ).fetchone()
 
-                if not init_mode:
-                    dup_match = is_channel_duplicate(conn, channel, clean_title)
-                    if dup_match:
-                        print(f"[DEDUPED] ({channel}) {name}: {clean_title} ~= {dup_match}")
+                if row is None:
+                    if init_mode:
+                        conn.execute(
+                            "INSERT INTO seen_items (item_id, source_name, category, title, link, seen_at, escalated) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                            (item["id"], name, category, clean_title, item["link"], now),
+                        )
+                        conn.commit()
+                        found_new = True
+                        total_seeded += 1
                         continue
 
                     badges, reasons = enrich_and_evaluate(clean_title, ftype, kev_set, kw_cfg)
-                    base_msg = f"**[{name}]** [{clean_title}](<{item['link']}>){badges}"
-                    send_discord(notifiers, channel, base_msg)
-                    record_posted_headline(conn, channel, name, clean_title, now)
+                    should_escalate = bool(reasons) and channel != "active-exploitation"
+                    conn.execute(
+                        "INSERT INTO seen_items (item_id, source_name, category, title, link, seen_at, escalated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (item["id"], name, category, clean_title, item["link"], now, 1 if should_escalate else 0),
+                    )
+                    conn.commit()
+                    found_new = True
 
-                    if reasons and channel != "active-exploitation":
-                        if not is_channel_duplicate(conn, "active-exploitation", clean_title):
-                            ping = "@here " if kw_cfg.get("ping_here_on_escalation", False) else ""
-                            reason_tag = ", ".join(reasons)
-                            esc_msg = f"{ping}🔔 **[{reason_tag}]** **[{name}]** [{clean_title}](<{item['link']}>){badges}"
-                            send_discord(notifiers, "active-exploitation", esc_msg)
-                            record_posted_headline(conn, "active-exploitation", name, clean_title, now)
+                    dup_match = is_channel_duplicate(conn, channel, clean_title)
+                    if dup_match:
+                        print(f"[DEDUPED] ({channel}) {name}: {clean_title} ~= {dup_match}")
+                    else:
+                        base_msg = f"**[{name}]** [{clean_title}](<{item['link']}>){badges}"
+                        send_discord(notifiers, channel, base_msg)
+                        record_posted_headline(conn, channel, name, clean_title, now)
+
+                    if should_escalate and not is_channel_duplicate(conn, "active-exploitation", clean_title):
+                        ping = "@here " if kw_cfg.get("ping_here_on_escalation", False) else ""
+                        reason_tag = ", ".join(reasons)
+                        esc_msg = f"{ping}🔔 **[{reason_tag}]** **[{name}]** [{clean_title}](<{item['link']}>){badges}"
+                        send_discord(notifiers, "active-exploitation", esc_msg)
+                        record_posted_headline(conn, "active-exploitation", name, clean_title, now)
+
+                else:
+                    if init_mode:
+                        continue
+                    old_title, already_escalated = row[0], row[1]
+                    meaningful = is_meaningful_update(old_title, clean_title)
+                    badges, reasons = enrich_and_evaluate(clean_title, ftype, kev_set, kw_cfg)
+                    can_late_escalate = (not already_escalated) and bool(reasons) and channel != "active-exploitation"
+
+                    if not meaningful and not can_late_escalate:
+                        continue
+
+                    new_esc_state = 1 if (already_escalated or can_late_escalate) else 0
+                    conn.execute(
+                        "UPDATE seen_items SET title = ?, seen_at = ?, escalated = ? WHERE item_id = ?",
+                        (clean_title, now, new_esc_state, item["id"]),
+                    )
+                    conn.commit()
+                    found_new = True
+
+                    if meaningful:
+                        upd_msg = f"🔄 **[Updated]** **[{name}]** [{clean_title}](<{item['link']}>){badges}"
+                        send_discord(notifiers, channel, upd_msg)
+                        record_posted_headline(conn, channel, name, clean_title, now)
+
+                    if can_late_escalate and not is_channel_duplicate(conn, "active-exploitation", clean_title):
+                        ping = "@here " if kw_cfg.get("ping_here_on_escalation", False) else ""
+                        reason_tag = ", ".join(reasons)
+                        prefix = "🔄 **[Updated]** " if meaningful else ""
+                        esc_msg = f"{ping}{prefix}🔔 **[{reason_tag}]** **[{name}]** [{clean_title}](<{item['link']}>){badges}"
+                        send_discord(notifiers, "active-exploitation", esc_msg)
+                        record_posted_headline(conn, "active-exploitation", name, clean_title, now)
 
             update_health(conn, feed, True, "", found_new, notifiers, init_mode)
 

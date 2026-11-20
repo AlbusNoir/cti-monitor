@@ -1,26 +1,26 @@
 # CTI Monitor
 
-A lightweight, automated Cyber Threat Intelligence (CTI) collector and Discord push-notification ticker built with Python, `uv`, SQLite, and Apprise. It polls ~60 structured vulnerability feeds, ransomware leak trackers, vendor PSIRTs, threat research blogs, government CERTs, and breaking security news, enriches headlines with CISA KEV and FIRST EPSS data, deduplicates overlapping coverage, and routes alerts into dedicated Discord channels.
+A lightweight, automated Cyber Threat Intelligence (CTI) collector and Discord push-notification ticker built with Python, `uv`, SQLite, and Apprise. It polls ~60 structured vulnerability feeds, ransomware leak trackers, vendor PSIRTs, threat research blogs, government CERTs, and breaking security news, enriches headlines with CISA KEV and FIRST EPSS data, deduplicates overlapping coverage, tracks meaningful article updates, and routes alerts into dedicated Discord channels.
 
 ## How It Works
 
 1. **Source Ingestion (`feeds.json`):** Polls curated RSS, Atom, and JSON endpoints using `curl_cffi` (Chrome TLS impersonation) and `feedparser` with per-source timeouts and category routing.
-2. **Two-Tier Deduplication (`cti_monitor.db`):**
-   * **Exact Item Deduplication (`seen_items`):** Stores every seen item ID in SQLite so repeated cron runs never re-process old entries.
+2. **Two-Tier Deduplication & Update Tracking (`cti_monitor.db`):**
+   * **Exact Item & Update Tracking (`seen_items`):** Stores every seen item ID, its latest title, and escalation state in SQLite. Trivial CMS edits are ignored, while meaningful headline changes (`< 85%` similarity or a newly added `CVE-YYYY-NNNN`) trigger a `🔄 [Updated]` alert.
    * **Channel-Scoped Headline Deduplication (`posted_headlines`):** Normalizes titles and extracts CVEs/tokens over a rolling 36-hour window per channel. If multiple news outlets report the exact same story in `#firehose`, only the first headline posts while primary-source advisories in `#vendor-psirts-vulns` or `#active-exploitation` still post normally.
 3. **CVE Enrichment (`kev_cache.json` + FIRST EPSS):** Automatically extracts `CVE-YYYY-NNNN` identifiers from incoming headlines, cross-references them against a locally cached copy of the CISA Known Exploited Vulnerabilities (KEV) catalog, and queries the FIRST EPSS API for exploitation probability scores.
-4. **Dynamic Keyword & Escalation Routing (`keywords.json`):** Evaluates headlines against active-exploitation keywords, retrospective exclusion rules (`ignore_escalation_keywords`), vendor watchlists, KEV matches, and EPSS thresholds. High-priority matches are cross-posted to `#active-exploitation`.
+4. **Dynamic Keyword & Late Escalation Routing (`keywords.json`):** Evaluates headlines against active-exploitation keywords, retrospective exclusion rules (`ignore_escalation_keywords`), vendor watchlists, KEV matches, and EPSS thresholds. High-priority matches—including previously seen articles whose CVE is later added to CISA KEV or updated to confirm active exploitation—are cross-posted once to `#active-exploitation`.
 5. **Notification Delivery (`webhooks.json` + Apprise):** Formats clean, embed-suppressed Markdown links (`<URL>`) and delivers them to Discord (or any Apprise-supported provider).
 6. **Health Monitoring (`#bot-status`):** Tracks per-feed HTTP status, consecutive failures, and recovery events in SQLite, alerting after 3 consecutive failures and generating a daily health digest.
 
 ## Repository Structure
 
-* `cti_monitor.py` — Main collector, enrichment engine, deduplicator, and health reporter.
+* `cti_monitor.py` — Main collector, enrichment engine, deduplicator, update tracker, and health reporter.
 * `feeds.json` — Master registry of intelligence sources, categories, and target channels.
 * `keywords.json` — Dynamic keyword escalation rules, ignore filters, vendor watchlists, and EPSS thresholds.
 * `webhooks.example.json` — Template for configuring Apprise notification URLs.
 * `webhooks.json` — Live Apprise notification URLs *(ignored by Git)*.
-* `cti_monitor.db` — Local SQLite deduplication and feed health database *(ignored by Git)*.
+* `cti_monitor.db` — Local SQLite deduplication, update state, and feed health database *(ignored by Git)*.
 * `kev_cache.json` — Local cache of CISA KEV CVE IDs *(ignored by Git)*.
 
 ## Setup Guide (Ubuntu 24.04 LTS)
